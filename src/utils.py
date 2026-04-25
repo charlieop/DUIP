@@ -97,6 +97,26 @@ def ndcg_at_k(scores: torch.Tensor, k: int) -> float:
     return float(gains.mean().item())
 
 
+def hr_ndcg_from_scores(
+    scores: torch.Tensor, ks: Iterable[int] = (1, 5)
+) -> Dict[str, float]:
+    """Vectorized HR@K + NDCG@K for all ``k`` in ``ks`` from a [B, C] tensor.
+
+    Cheaper than calling :func:`hit_at_k` / :func:`ndcg_at_k` once per K
+    because it computes the rank-of-positive only once. Used during
+    training to log in-batch ranking quality every step.
+    """
+    ranks = _ranks_of_positive(scores)
+    out: Dict[str, float] = {}
+    for k in ks:
+        in_top = ranks < int(k)
+        out[f"HR@{k}"] = float(in_top.float().mean().item())
+        gains = torch.zeros_like(ranks, dtype=torch.float32)
+        gains[in_top] = 1.0 / torch.log2(ranks[in_top].float() + 2.0)
+        out[f"NDCG@{k}"] = float(gains.mean().item())
+    return out
+
+
 def _ranks_of_positive(scores: torch.Tensor) -> torch.Tensor:
     """Return the 0-based rank of the candidate at index 0 of each row.
 

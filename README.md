@@ -57,13 +57,19 @@ Targeted at **RTX 5070 Ti, 12 GB**:
 | Component                          | Approx. VRAM |
 |------------------------------------|--------------|
 | Qwen3.5-2B in BF16 (frozen)        | ~5 GB        |
-| Activations (gradient checkpointed)| ~3–4 GB      |
+| Activations (no grad-checkpoint)   | ~3–4 GB      |
 | Item embeddings + LSTM + projector | ~0.3 GB      |
 | Optimizer state (AdamW, small)     | ~0.2 GB      |
 | **Peak**                           | **~9–10 GB** |
 
-If you run out of memory, reduce `model.max_session_len` and/or
-`train.micro_batch_size` in `configs/games.yaml`.
+The forward pass batches **all** candidates of a step (`B*C` sequences)
+into a single LLM call. To bound peak activation memory the chunk size is
+exposed as `model.cand_chunk_size` (default 32). If you OOM:
+
+- Lower `model.cand_chunk_size` (e.g. 16 or 8).
+- Lower `train.micro_batch_size`.
+- Re-enable `model.gradient_checkpointing: true`.
+- Lower `data.max_session_len`.
 
 ---
 
@@ -74,6 +80,11 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -U pip
 pip install -r requirements.txt
+
+# Log in once so training streams to your dashboard. Skip this and set
+# `logging.wandb.mode: offline` (or `disabled`) in configs/games.yaml if
+# you don't want online tracking.
+wandb login
 ```
 
 > The first call will pull `Qwen/Qwen3.5-2B` (~5 GB) from the Hugging Face Hub.
@@ -87,6 +98,14 @@ pip install -r requirements.txt
 > ```
 > Our `_load_qwen_lm` helper transparently handles both the pure-causal-LM
 > and the multimodal `ImageTextToText` checkpoint variants.
+
+> **Flash-Attention-2 (optional)**: `flash-attn` is *optional*. If
+> installed, the LLM is loaded with `attn_implementation="flash_attention_2"`;
+> otherwise the code falls back to PyTorch SDPA (which itself uses FA2
+> kernels when available on your GPU), and finally to the eager attention
+> kernel. Override the chain via `model.attn_implementation` in
+> [`configs/games.yaml`](configs/games.yaml) (`flash_attention_2` |
+> `sdpa` | `eager` | `auto`).
 
 ---
 
@@ -116,6 +135,13 @@ Outputs:
 - `data/processed/items.json`              – item id ↔ title catalog
 - `checkpoints/games/best.pt`              – best validation checkpoint
 - `results/games.json`                     – HR@1, HR@5, NDCG@1, NDCG@5
+- `logs/games/<run_name>/run.log`          – plain-text per-run log
+- `logs/games/<run_name>/metrics.jsonl`    – structured per-step metrics
+- W&B project `duip` (when `logging.wandb.enabled: true`) – live charts
+  for `train/loss`, `train/loss_ema`, `train/lr`, `train/grad_norm`,
+  `train/samples_per_sec`, `train/tokens_per_sec`, `train/gpu_mem_*`,
+  `train/in_batch_HR@K`, `train/in_batch_NDCG@K`, plus `val/*` and
+  `test/*` rollups.
 
 ---
 
@@ -153,3 +179,22 @@ project1/
   fixed in `configs/games.yaml` for reproducibility.
 - The Qwen3.5-2B model is multimodal; we explicitly load only its
   text/language-model component (vision tower is dropped after load).
+
+---
+
+## 7. Performance & logging knobs
+
+All under [`configs/games.yaml`](configs/games.yaml):
+
+| Block | Key | Notes |
+|-------|-----|-------|
+| `model` | `attn_implementation` | `flash_attention_2` (default) → `sdpa` → `eager` fallback chain. |
+| `model` | `cand_chunk_size` | Cap on `B*C` sequences per LLM call. Lower if you OOM. |
+| `model` | `gradient_checkpointing` | Default `false`. Re-enable for tighter VRAM at the cost of compute. |
+| `train` | `micro_batch_size`, `grad_accum_steps` | Effective batch = product. Bump `micro_batch_size` first to feed the GPU. |
+| `train` | `num_workers`, `persistent_workers`, `prefetch_factor` | Keep the GPU fed from the data side. |
+| `eval`  | `micro_batch_size`, `num_workers` | Eval uses `inference_mode`, so VRAM headroom is larger than training. |
+| `eval`  | `cand_chunk_size` | Overrides `model.cand_chunk_size` during eval only. Eval is forward-only so a larger value (e.g. 32–64) is usually safe and noticeably faster than the training default. |
+| `runtime` | `tf32`, `cudnn_benchmark`, `matmul_precision` | One-line throughput wins on Ampere+ GPUs. |
+| `logging` | `wandb.{enabled,project,entity,run_name,mode}` | `mode: disabled` skips W&B entirely; `offline` queues runs locally. |
+| `logging` | `log_every_steps`, `jsonl` | Detailed metrics (loss / EMA / LR / grad-norm / throughput / VRAM / in-batch HR & NDCG) are emitted every N optimizer steps to console + JSONL + W&B. |

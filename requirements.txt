@@ -10,3 +10,7 @@ pyyaml>=6.0
 tqdm>=4.66
 numpy>=1.26
 pandas>=2.0
+wandb>=0.17
+# Optional: enables Flash-Attention-2. The code falls back to PyTorch SDPA
+# (which itself uses FA2 kernels when available) if flash-attn is missing.
+# flash-attn>=2.5
