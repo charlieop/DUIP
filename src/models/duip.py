@@ -290,6 +290,12 @@ class DUIPModel(nn.Module):
         B = history_ids.shape[0]
         embed_layer = self.llm.get_input_embeddings()
 
+        # Match the LLM's embedding dtype (BF16 for Qwen3.5) so the spliced
+        # stream stays consistent. Casting `soft_b` to BF16 keeps the
+        # operation differentiable so gradients still flow back to the
+        # projector / LSTM in FP32.
+        target_dtype = embed_layer.weight.dtype
+
         per_example: List[torch.Tensor] = []
         for b in range(B):
             history_str = self._format_history(history_ids, history_mask, b)
@@ -303,9 +309,9 @@ class DUIPModel(nn.Module):
                 post_text, add_special_tokens=False, return_tensors="pt"
             )["input_ids"][0].to(self.device_)
 
-            pre_emb = embed_layer(pre_ids).to(soft_prompts.dtype)
-            post_emb = embed_layer(post_ids).to(soft_prompts.dtype)
-            soft_b = soft_prompts[b].to(soft_prompts.dtype)
+            pre_emb = embed_layer(pre_ids).to(target_dtype)
+            post_emb = embed_layer(post_ids).to(target_dtype)
+            soft_b = soft_prompts[b].to(target_dtype)
             per_example.append(torch.cat([pre_emb, soft_b, post_emb], dim=0))
 
         # Right-align (left-pad) so end positions coincide.

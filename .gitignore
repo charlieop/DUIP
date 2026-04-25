@@ -1,0 +1,105 @@
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+.eggs/
+build/
+dist/
+develop-eggs/
+.installed.cfg
+MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ---------------------------------------------------------------------------
+# Virtual environments
+# ---------------------------------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# ---------------------------------------------------------------------------
+# Testing / coverage
+# ---------------------------------------------------------------------------
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.pytype/
+
+# ---------------------------------------------------------------------------
+# Notebooks
+# ---------------------------------------------------------------------------
+.ipynb_checkpoints/
+
+# ---------------------------------------------------------------------------
+# Editor / IDE
+# ---------------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ---------------------------------------------------------------------------
+# OS junk
+# ---------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------------------------------------------------------------------------
+# Cursor / agent runtime
+# ---------------------------------------------------------------------------
+.cursor/
+
+# ---------------------------------------------------------------------------
+# Project artifacts (data, model weights, training outputs)
+#
+# These are huge (multi-GB) and reproducible from the pipeline:
+#   data/raw/         <- HF cache + slim reviews/meta parquet
+#   data/processed/   <- sessionized train/val/test jsonl + items.json
+#   checkpoints/      <- trained .pt weights
+#   results/          <- eval metrics + training history
+#   logs/             <- per-run text logs from get_logger()
+# ---------------------------------------------------------------------------
+data/
+checkpoints/
+results/
+logs/
+
+# Hugging Face / transformers / datasets caches if they ever land in-repo
+.cache/
+*.parquet
+*.arrow
+
+# ---------------------------------------------------------------------------
+# Model weight files (in case any land outside checkpoints/)
+# ---------------------------------------------------------------------------
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.ckpt
+*.onnx
+
+# ---------------------------------------------------------------------------
+# Secrets
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key

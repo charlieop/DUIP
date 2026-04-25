@@ -32,26 +32,30 @@ model:
   max_title_tokens: 24
   hard_prompt_template: |
     The user has recently interacted with the following games (most recent last): {history}.
-    {soft_prompt}
+    <SOFT_PROMPT>
     Based on this interaction history, the next game the user is most likely to want is:
 
 train:
-  num_epochs: 10
+  num_epochs: 1
   micro_batch_size: 1
   grad_accum_steps: 8
-  num_negatives: 15
+  num_negatives: 7
   lr: 1.0e-3
   weight_decay: 1.0e-4
-  warmup_steps: 200
+  warmup_steps: 10
   cosine_schedule: true
   max_grad_norm: 1.0
-  log_every: 50
+  log_every: 25
   eval_every_epochs: 1
   early_stop_patience: 3
-  num_workers: 2
+  num_workers: 0
+  # Smoke-test cap: drop / set to null to train on the full split.
+  max_train_sessions: 200
 
 eval:
   num_negatives: 99
   negative_seed: 12345
   ks: [1, 5]
-  max_test_sessions: null  # set to an int to subsample for quick checks
+  # Smoke-test caps: drop / set to null for full evaluation.
+  max_val_sessions: 50
+  max_test_sessions: 100

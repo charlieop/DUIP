@@ -85,7 +85,15 @@ def run_training(config_path: str) -> Dict[str, float]:
         max_history_len=cfg["data"]["max_session_len"],
         seed=cfg["seed"],
     )
+    # Optional cap for quick smoke tests / debugging.
+    max_train_sessions = cfg["train"].get("max_train_sessions")
+    if max_train_sessions is not None:
+        train_ds.sessions = train_ds.sessions[: int(max_train_sessions)]
+        logger.info("Capped train set to %d sessions for smoke test.",
+                    len(train_ds.sessions))
+
     val_ds_path = Path(cfg["paths"]["processed_dir"]) / "val.jsonl"
+    max_val_sessions = cfg["eval"].get("max_val_sessions")
 
     train_loader = DataLoader(
         train_ds,
@@ -183,6 +191,7 @@ def run_training(config_path: str) -> Dict[str, float]:
                 max_history_len=cfg["data"]["max_session_len"],
                 seed=cfg["eval"]["negative_seed"],
                 micro_batch_size=cfg["train"]["micro_batch_size"],
+                max_sessions=max_val_sessions,
                 desc=f"val epoch {epoch + 1}",
             )
             history["val_metrics"].append({"epoch": epoch + 1, **metrics})
