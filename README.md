@@ -111,6 +111,12 @@ wandb login
 
 ## 4. End-to-end run
 
+> Every CLI block below is written as **single-line commands** so they
+> work identically in `bash` / `zsh` and Windows PowerShell. (PowerShell
+> uses backtick `` ` `` for line-continuation, not `\`, so multi-line
+> bash-style examples will fail with `Missing expression after unary
+> operator '--'`.)
+
 ```bash
 # 1. Download + sessionize the Amazon Reviews 2023 Games subset
 python -m scripts.prepare_data --config configs/games.yaml
@@ -119,8 +125,7 @@ python -m scripts.prepare_data --config configs/games.yaml
 python -m scripts.run_training --config configs/games.yaml
 
 # 3. Evaluate on the test split
-python -m scripts.run_eval --config configs/games.yaml \
-    --checkpoint checkpoints/games/best.pt
+python -m scripts.run_eval --config configs/games.yaml --checkpoint checkpoints/games/best.pt
 ```
 
 Or run everything:
@@ -128,6 +133,77 @@ Or run everything:
 ```bash
 bash scripts/run_all.sh
 ```
+
+### 4.1 Running on Modal (H100, remote GPU)
+
+The same pipeline can be launched on [Modal](https://modal.com)'s managed
+H100 GPUs without any local CUDA setup. The entrypoint is
+[`modal_app.py`](modal_app.py).
+
+```bash
+# 1. Install the modal client (already in requirements.txt)
+pip install -r requirements.txt
+
+# 2. Copy the env template and fill in the secrets
+cp .env.example .env          # then edit .env with your favourite editor
+#   -> MODAL_TOKEN_ID / MODAL_TOKEN_SECRET  (from https://modal.com/settings/tokens)
+#   -> WANDB_API_KEY                         (from https://wandb.ai/authorize)
+#   -> HF_TOKEN  (optional, only if you hit gated/rate-limited HF downloads)
+
+# 3. Run any of the following (each is a Modal local entrypoint).
+#    Run ONE COMMAND AT A TIME — don't paste all four lines into your
+#    shell at once or PowerShell / bash will treat them as one big
+#    pipeline and complain.
+modal run modal_app.py::prepare_data    # one-time data download -> volume
+modal run modal_app.py::train           # train on H100 (~1 H100 GPU)
+modal run modal_app.py::evaluate        # eval best.pt on H100
+modal run modal_app.py::run_all         # all three in sequence
+
+# The default --config is configs/games.yaml (the 1-epoch / 200-session
+# smoke test). For a real production run, point at the H100-tuned schedule
+# in configs/games_h100.yaml (5 epochs, full split, micro_batch=16,
+# grad_accum=4 -> effective batch=64, 15 in-batch negatives):
+modal run modal_app.py::train --config configs/games_h100.yaml
+modal run modal_app.py::evaluate --config configs/games_h100.yaml --checkpoint checkpoints/games_h100/best.pt
+```
+
+What `modal_app.py` sets up for you:
+
+- **Image**: `debian_slim` + Python 3.11 + Torch (cu124 wheels — see
+  comment in `modal_app.py` for why we pin the index) + Transformers /
+  Datasets / Wandb. Builds in ~1-2 minutes.
+- **Attention kernel**: PyTorch SDPA. On H100, SDPA dispatches to
+  Flash-Attention-2/3 internally, so we skip the standalone `flash-attn`
+  package (it requires the `cuda:devel` base + ~10 min of nvcc compile,
+  and the version matrix vs. PyTorch / CUDA is brittle). The DUIP code's
+  `_attn_fallback_chain` handles this transparently — you'll see
+  `attn_implementation_used=sdpa` in the run log instead of
+  `flash_attention_2`. To force the standalone wheel back in, uncomment
+  the block in `modal_app.py`.
+- **GPU**: a single **H100** per function call (override to `H100:N` for
+  multi-GPU experiments).
+- **Persistent volumes** (one per artifact kind, named for easy `modal
+  volume ...` introspection):
+
+  | Mount inside the container          | Volume name        | Purpose |
+  |-------------------------------------|--------------------|---------|
+  | `/root/data`                        | `duip-data`        | raw + sessionized splits |
+  | `/root/checkpoints`                 | `duip-checkpoints` | trained `.pt` weights |
+  | `/root/results`                     | `duip-results`     | eval JSON + history |
+  | `/root/logs`                        | `duip-logs`        | per-run text + JSONL logs |
+  | `/root/.cache/huggingface`          | `duip-hf-cache`    | Qwen3.5-2B weights cache |
+
+- **Secrets**: `WANDB_API_KEY` (and `HF_TOKEN` if you set it) are forwarded
+  into the container as a Modal Secret built from your local `.env`. The
+  `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` values are read by the local
+  `modal` CLI only and are *not* shipped to the GPU container.
+
+> **Inspecting / wiping volumes** — use the standard Modal CLI:
+> ```bash
+> modal volume ls
+> modal volume get duip-checkpoints checkpoints/games/best.pt ./best.pt
+> modal volume rm  duip-data --recursive   # wipe + start fresh
+> ```
 
 Outputs:
 
@@ -162,11 +238,14 @@ project1/
 │   ├── train.py                # InfoNCE training loop
 │   ├── evaluate.py             # HR@K / NDCG@K eval
 │   └── utils.py                # metrics, seeding, logging
-└── scripts/
-    ├── prepare_data.py
-    ├── run_training.py
-    ├── run_eval.py
-    └── run_all.sh
+├── scripts/
+│   ├── prepare_data.py
+│   ├── run_training.py
+│   ├── run_eval.py
+│   └── run_all.sh
+├── modal_app.py                # Modal entrypoint (H100 + persistent volumes)
+├── .env.example                # template for MODAL / WANDB / HF secrets
+└── .env                        # your filled-in copy (gitignored)
 ```
 
 ---
