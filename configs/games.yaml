@@ -1,0 +1,57 @@
+seed: 42
+
+paths:
+  raw_dir: data/raw
+  processed_dir: data/processed
+  checkpoint_dir: checkpoints/games
+  results_path: results/games.json
+  log_dir: logs/games
+
+data:
+  hf_dataset: McAuley-Lab/Amazon-Reviews-2023
+  review_config: raw_review_Video_Games
+  meta_config: raw_meta_Video_Games
+  min_session_len: 2
+  max_session_len: 20
+  min_user_sessions: 2
+  min_item_freq: 5
+  train_ratio: 0.8
+  val_ratio: 0.1
+
+model:
+  llm_name: Qwen/Qwen3.5-2B
+  llm_dtype: bfloat16
+  item_embed_dim: 128
+  lstm_hidden_dim: 256
+  lstm_num_layers: 2
+  lstm_dropout: 0.1
+  num_soft_tokens: 8
+  warm_start_item_embeddings: true
+  freeze_llm: true
+  gradient_checkpointing: true
+  max_title_tokens: 24
+  hard_prompt_template: |
+    The user has recently interacted with the following games (most recent last): {history}.
+    {soft_prompt}
+    Based on this interaction history, the next game the user is most likely to want is:
+
+train:
+  num_epochs: 10
+  micro_batch_size: 1
+  grad_accum_steps: 8
+  num_negatives: 15
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  warmup_steps: 200
+  cosine_schedule: true
+  max_grad_norm: 1.0
+  log_every: 50
+  eval_every_epochs: 1
+  early_stop_patience: 3
+  num_workers: 2
+
+eval:
+  num_negatives: 99
+  negative_seed: 12345
+  ks: [1, 5]
+  max_test_sessions: null  # set to an int to subsample for quick checks
