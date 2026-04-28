@@ -54,7 +54,7 @@ class LSTMEncoder(nn.Module):
 
     @torch.no_grad()
     def warm_start_from(self, embeddings: torch.Tensor) -> None:
-        """Initialize the item table from a [num_items, item_embed_dim] tensor."""
+        """ the item table from a [num_items, item_embed_dim] tensor."""
         if embeddings.shape != (self.num_items, self.item_embed_dim):
             raise ValueError(
                 f"warm-start tensor must have shape "

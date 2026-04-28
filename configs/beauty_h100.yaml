@@ -14,22 +14,22 @@
 seed: 42
 
 paths:
-  raw_dir: data/raw
-  processed_dir: data/processed
+  raw_dir: data/raw-beauty
+  processed_dir: data/processed-beauty
   # Separate checkpoint / results / log dirs so a smoke-test run on
   # `games.yaml` never silently overwrites a real run's artifacts.
-  checkpoint_dir: checkpoints/games_h100
-  results_path: results/games_h100.json
-  log_dir: logs/games_h100
+  checkpoint_dir: checkpoints/beauty_h100
+  results_path: results/beauty_h100.json
+  log_dir: logs/beauty_h100
 
 data:
   hf_dataset: McAuley-Lab/Amazon-Reviews-2023
-  review_config: raw_review_Video_Games
-  meta_config: raw_meta_Video_Games
-  min_session_len: 5
+  review_config: raw_review_All_Beauty
+  meta_config: raw_meta_All_Beauty
+  min_session_len: 3
   max_session_len: 20
-  min_user_sessions: 2
-  min_item_freq: 5
+  min_user_sessions: 1
+  min_item_freq: 3
   train_ratio: 0.8
   val_ratio: 0.1
 
@@ -71,11 +71,11 @@ train:
   # 5 epochs over the full ~half-million-session train split is enough
   # for the LSTM + soft-prompt projector + item embeddings to converge
   # against a frozen 0.8B-param LM (the trainable budget is < 30 M params).
-  num_epochs: 5
+  num_epochs: 3
 
   # Effective batch = micro_batch_size * grad_accum_steps = 64.
   micro_batch_size: 4
-  grad_accum_steps: 8
+  grad_accum_steps: 4
 
   # InfoNCE benefits from more in-batch negatives. 15 negatives + 1
   # positive = 16 candidates per session, matching `cand_chunk_size=64`
@@ -90,7 +90,7 @@ train:
 
   # ~500 warmup steps over a ~12 k-step epoch is the standard 4% rule,
   # which keeps the cosine decay well-behaved.
-  warmup_steps: 50
+  warmup_steps: 500
   cosine_schedule: true
   max_grad_norm: 1.0
 

@@ -1,4 +1,4 @@
-"""Modal entrypoint for the DUIP pipeline (Qwen3.5-2B + LSTM, frozen LLM).
+"""Modal entrypoint for the DUIP pipeline (Qwen3.5-0.8B + LSTM, frozen LLM).
 
 Runs the same `prepare_data`, `train`, and `eval` flows as the local
 scripts, but on Modal's managed **H100** GPUs with persistent volumes for
@@ -24,7 +24,9 @@ across subsequent runs, so only the first launch pays the build cost.
 
 from __future__ import annotations
 
+import json
 import os
+from pathlib import Path
 
 # Load .env *before* importing modal so MODAL_TOKEN_ID / MODAL_TOKEN_SECRET
 # (and WANDB_API_KEY / HF_TOKEN, which we forward as a Modal Secret) are
@@ -195,10 +197,34 @@ SECRETS = [modal.Secret.from_dict(_secret_kv)] if _secret_kv else []
 # App + shared function kwargs.
 # --------------------------------------------------------------------------
 
-app = modal.App("duip-qwen3p5-2b")
+app = modal.App("duip-qwen3p5-0p8b")
 
 DEFAULT_CONFIG = "configs/games.yaml"
 DEFAULT_CHECKPOINT = "checkpoints/games/best.pt"
+_PROCESSED_REQUIRED_FILES = (
+    "items.json",
+    "train.jsonl",
+    "val.jsonl",
+    "test.jsonl",
+    "stats.json",
+)
+
+
+def _cached_processed_stats(processed_dir: str) -> dict | None:
+    """Return cached preprocessing stats when all split artifacts exist."""
+    out = Path(processed_dir)
+    for name in _PROCESSED_REQUIRED_FILES:
+        path = out / name
+        if not path.is_file() or path.stat().st_size == 0:
+            return None
+
+    try:
+        with open(out / "stats.json", "r") as f:
+            stats = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    return stats if isinstance(stats, dict) else None
 
 # CPU-only step (data download + sessionization). Bumping memory because
 # the raw Amazon Reviews 2023 (Games) JSONL is multi-GB.
@@ -239,7 +265,7 @@ def _enter_workdir() -> None:
 # --------------------------------------------------------------------------
 
 @app.function(**_CPU_KWARGS)
-def prepare_data_remote(config: str = DEFAULT_CONFIG) -> dict:
+def prepare_data_remote(config: str = DEFAULT_CONFIG, force: bool = False) -> dict:
     """Download + sessionize the Amazon Reviews 2023 (Games) subset onto
     the ``duip-data`` volume."""
     _enter_workdir()
@@ -253,6 +279,18 @@ def prepare_data_remote(config: str = DEFAULT_CONFIG) -> dict:
 
     ensure_dir(cfg["paths"]["raw_dir"])
     ensure_dir(cfg["paths"]["processed_dir"])
+
+    if force:
+        logger.info("Force rebuild requested; ignoring existing processed data.")
+    else:
+        cached_stats = _cached_processed_stats(cfg["paths"]["processed_dir"])
+        if cached_stats is not None:
+            logger.info(
+                "Reusing processed data in %s. Pass force=True to rebuild.",
+                cfg["paths"]["processed_dir"],
+            )
+            logs_volume.commit()
+            return cached_stats
 
     logger.info("Downloading raw Amazon Reviews 2023 (Games) ...")
     download_games(
@@ -315,76 +353,14 @@ def evaluate_remote(
     return metrics
 
 
-# region agent log
-# Temporary diagnostic plumbing for the causal_conv1d <-> torch C++ ABI mismatch
-# observed on the H100 (`undefined symbol: ...torchCheckFail...std::__cxx11::
-# basic_string...`). Not part of the production pipeline; remove once ABI is
-# resolved with runtime evidence.
-@app.function(**_CPU_KWARGS)
-def inspect_remote() -> None:
-    """Dump torch/causal-conv1d ABI info from inside the actual built image."""
-    _enter_workdir()
-    import os
-    import subprocess
-    import sys
-
-    def _run(cmd):
-        try:
-            return subprocess.run(cmd, capture_output=True, text=True, timeout=60).stdout
-        except FileNotFoundError:
-            return f"<missing tool: {cmd[0]}>"
-
-    print("\n=== PYTHON / TORCH ===", flush=True)
-    print("python:", sys.version.replace("\n", " "), flush=True)
-    import torch  # noqa: PLC0415
-    print("torch.__version__:", torch.__version__, flush=True)
-    print("torch.version.cuda:", torch.version.cuda, flush=True)
-    print("torch._C._GLIBCXX_USE_CXX11_ABI:", torch._C._GLIBCXX_USE_CXX11_ABI, flush=True)
-    print("torch.__file__:", torch.__file__, flush=True)
-
-    print("\n=== PIP METADATA ===", flush=True)
-    print(_run(["pip", "show", "causal-conv1d"]), flush=True)
-    print(_run(["pip", "show", "torch"]), flush=True)
-
-    so_path = "/usr/local/lib/python3.11/site-packages/causal_conv1d_cuda.cpython-311-x86_64-linux-gnu.so"
-    libtorch_cpu = os.path.join(os.path.dirname(torch.__file__), "lib", "libtorch_cpu.so")
-    libc10 = os.path.join(os.path.dirname(torch.__file__), "lib", "libc10.so")
-
-    print("\n=== UNDEFINED torchCheckFail SYMBOLS in causal_conv1d_cuda.so ===", flush=True)
-    print("path exists:", os.path.exists(so_path), so_path, flush=True)
-    if os.path.exists(so_path):
-        out = _run(["nm", "-D", "--undefined-only", so_path]) or _run(["objdump", "-T", so_path])
-        for line in out.splitlines():
-            if "torchCheckFail" in line:
-                print(line, flush=True)
-
-    for lib_path, label in ((libtorch_cpu, "libtorch_cpu"), (libc10, "libc10")):
-        print(f"\n=== DEFINED torchCheckFail SYMBOLS in {label} ===", flush=True)
-        print("path exists:", os.path.exists(lib_path), lib_path, flush=True)
-        if os.path.exists(lib_path):
-            out = _run(["nm", "-D", "--defined-only", lib_path]) or _run(["objdump", "-T", lib_path])
-            for line in out.splitlines():
-                if "torchCheckFail" in line:
-                    print(line, flush=True)
-
-    print("\n=== ATTEMPTING IMPORT causal_conv1d ===", flush=True)
-    try:
-        import causal_conv1d  # noqa: PLC0415
-        print("OK:", causal_conv1d.__file__, flush=True)
-    except Exception as e:
-        print("FAILED:", type(e).__name__, str(e), flush=True)
-    print("=== END INSPECT ===\n", flush=True)
-# endregion
-
-
 # --------------------------------------------------------------------------
 # Local entrypoints — invoked via `modal run modal_app.py::<name>`.
 # --------------------------------------------------------------------------
 
 @app.local_entrypoint()
-def prepare_data(config: str = DEFAULT_CONFIG) -> None:
+def prepare_data(config: str = DEFAULT_CONFIG, force: bool = False) -> None:
     """Run the data download + sessionization on Modal."""
-    out = prepare_data_remote.remote(config)
+    out = prepare_data_remote.remote(config, force=force)
     print("[prepare_data] ->", out)
 
 
@@ -408,20 +384,25 @@ def evaluate(
 
 
 @app.local_entrypoint()
-def run_all(config: str = DEFAULT_CONFIG) -> None:
-    """End-to-end: prepare_data -> train -> evaluate."""
+def run_all(config: str = DEFAULT_CONFIG, force_prepare: bool = False) -> None:
+    """End-to-end: prepare_data -> train -> evaluate.
+
+    The eval-stage checkpoint is derived from ``cfg.paths.checkpoint_dir``
+    so this works for both ``configs/games.yaml`` (-> ``checkpoints/games/
+    best.pt``) and ``configs/games_h100.yaml`` (-> ``checkpoints/
+    games_h100/best.pt``) without manual override.
+    """
+    import yaml as _yaml
+    from pathlib import PurePosixPath as _PPath
+
+    with open(config, "r") as _f:
+        _cfg = _yaml.safe_load(_f)
+    ckpt = str(_PPath(_cfg["paths"]["checkpoint_dir"]) / "best.pt")
+
     print("[1/3] Preparing data ...")
-    prepare_data_remote.remote(config)
+    prepare_data_remote.remote(config, force=force_prepare)
     print("[2/3] Training ...")
     train_remote.remote(config)
-    print("[3/3] Evaluating ...")
-    metrics = evaluate_remote.remote(config, DEFAULT_CHECKPOINT)
+    print("[3/3] Evaluating (%s) ..." % ckpt)
+    metrics = evaluate_remote.remote(config, ckpt)
     print("[run_all] test metrics:", metrics)
-
-
-# region agent log
-@app.local_entrypoint()
-def inspect() -> None:
-    """Run the remote ABI/version diagnostic. Temporary; pairs with inspect_remote."""
-    inspect_remote.remote()
-# endregion
