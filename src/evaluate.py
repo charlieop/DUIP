@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 import torch
 from torch.utils.data import DataLoader
@@ -13,7 +14,7 @@ from tqdm.auto import tqdm
 from .data.dataset import SessionDataset, collate
 from .data.preprocess import load_items_table
 from .logging_utils import RunLogger, gpu_mem_stats
-from .models.duip import DUIPModel
+from .models.duip import DUIPModel, PROMPT_MODES
 from .utils import (
     ensure_dir,
     hit_at_k,
@@ -21,6 +22,9 @@ from .utils import (
     ndcg_at_k,
     set_seed,
 )
+
+
+DEFAULT_PROMPT_ABLATION_MODES = ("soft_hard", "soft_only", "hard_only")
 
 
 def _build_eval_loader(
@@ -40,6 +44,94 @@ def _build_eval_loader(
         kwargs["persistent_workers"] = True
         kwargs["prefetch_factor"] = 2
     return DataLoader(ds, **kwargs)
+
+
+def _apply_runtime_tweaks(cfg: dict) -> None:
+    # Honour the same runtime tweaks here so eval-only invocations also
+    # benefit from TF32 / cudnn.benchmark when available.
+    rt = cfg.get("runtime", {}) or {}
+    if rt.get("tf32", True) and torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+    if rt.get("cudnn_benchmark", True):
+        torch.backends.cudnn.benchmark = True
+
+
+def _build_eval_model(cfg: dict, titles: List[str], device: str) -> DUIPModel:
+    return DUIPModel(
+        num_items=len(titles),
+        item_titles=titles,
+        llm_name=cfg["model"]["llm_name"],
+        llm_dtype=cfg["model"]["llm_dtype"],
+        item_embed_dim=cfg["model"]["item_embed_dim"],
+        lstm_hidden_dim=cfg["model"]["lstm_hidden_dim"],
+        lstm_num_layers=cfg["model"]["lstm_num_layers"],
+        lstm_dropout=cfg["model"]["lstm_dropout"],
+        num_soft_tokens=cfg["model"]["num_soft_tokens"],
+        max_title_tokens=cfg["model"]["max_title_tokens"],
+        hard_prompt_template=cfg["model"]["hard_prompt_template"],
+        warm_start_item_embeddings=cfg["model"]["warm_start_item_embeddings"],
+        freeze_llm=cfg["model"]["freeze_llm"],
+        gradient_checkpointing=False,  # not needed at eval
+        attn_implementation=cfg["model"].get(
+            "attn_implementation", "flash_attention_2"
+        ),
+        cand_chunk_size=cfg["model"].get("cand_chunk_size"),
+        prompt_mode=cfg["model"].get("prompt_mode", "soft_hard"),
+        device=device,
+    )
+
+
+def _load_checkpoint(
+    model: DUIPModel,
+    checkpoint: Optional[str],
+    rlog: RunLogger,
+) -> None:
+    if checkpoint is not None:
+        sd = torch.load(checkpoint, map_location="cpu")
+        model.load_trainable_state_dict(sd)
+        rlog.log_text("Loaded trainable weights from %s", checkpoint)
+    else:
+        rlog.log_warning(
+            "No checkpoint provided; evaluating the *untrained* model "
+            "(baseline only)."
+        )
+
+
+def _eval_micro_batch_size(cfg: dict) -> int:
+    return int(
+        cfg["eval"].get(
+            "micro_batch_size",
+            cfg["train"]["micro_batch_size"],
+        )
+    )
+
+
+def _normalize_prompt_modes(modes: Optional[Sequence[str]]) -> List[str]:
+    requested = list(modes) if modes is not None else list(DEFAULT_PROMPT_ABLATION_MODES)
+    if not requested:
+        raise ValueError("At least one prompt mode is required.")
+
+    out: List[str] = []
+    for mode in requested:
+        if mode not in PROMPT_MODES:
+            valid = ", ".join(PROMPT_MODES)
+            raise ValueError(f"Unknown prompt mode {mode!r}; expected one of: {valid}")
+        if mode not in out:
+            out.append(mode)
+    return out
+
+
+def _prompt_ablation_results_path(cfg: dict, results_path: Optional[str]) -> Path:
+    if results_path is not None:
+        return Path(results_path)
+
+    configured = (cfg.get("eval") or {}).get("prompt_ablation_results_path")
+    if configured:
+        return Path(configured)
+
+    base = Path(cfg["paths"]["results_path"])
+    return base.with_name(f"{base.stem}_prompt_ablation{base.suffix}")
 
 
 @torch.inference_mode()
@@ -157,39 +249,12 @@ def run_evaluation(config_path: str, checkpoint: Optional[str] = None) -> Dict[s
 
     rlog = RunLogger(cfg, run_kind="eval")
     try:
-        # Honour the same runtime tweaks here so eval-only invocations also
-        # benefit from TF32 / cudnn.benchmark when available.
-        rt = cfg.get("runtime", {}) or {}
-        if rt.get("tf32", True) and torch.cuda.is_available():
-            torch.backends.cuda.matmul.allow_tf32 = True
-            torch.backends.cudnn.allow_tf32 = True
-        if rt.get("cudnn_benchmark", True):
-            torch.backends.cudnn.benchmark = True
+        _apply_runtime_tweaks(cfg)
 
         titles, _ = load_items_table(cfg["paths"]["processed_dir"])
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        model = DUIPModel(
-            num_items=len(titles),
-            item_titles=titles,
-            llm_name=cfg["model"]["llm_name"],
-            llm_dtype=cfg["model"]["llm_dtype"],
-            item_embed_dim=cfg["model"]["item_embed_dim"],
-            lstm_hidden_dim=cfg["model"]["lstm_hidden_dim"],
-            lstm_num_layers=cfg["model"]["lstm_num_layers"],
-            lstm_dropout=cfg["model"]["lstm_dropout"],
-            num_soft_tokens=cfg["model"]["num_soft_tokens"],
-            max_title_tokens=cfg["model"]["max_title_tokens"],
-            hard_prompt_template=cfg["model"]["hard_prompt_template"],
-            warm_start_item_embeddings=cfg["model"]["warm_start_item_embeddings"],
-            freeze_llm=cfg["model"]["freeze_llm"],
-            gradient_checkpointing=False,  # not needed at eval
-            attn_implementation=cfg["model"].get(
-                "attn_implementation", "flash_attention_2"
-            ),
-            cand_chunk_size=cfg["model"].get("cand_chunk_size"),
-            device=device,
-        )
+        model = _build_eval_model(cfg, titles, device)
 
         rlog.log_hardware({
             "attn_implementation_used": getattr(model, "attn_impl_used", None),
@@ -197,15 +262,7 @@ def run_evaluation(config_path: str, checkpoint: Optional[str] = None) -> Dict[s
             "checkpoint": checkpoint,
         })
 
-        if checkpoint is not None:
-            sd = torch.load(checkpoint, map_location="cpu")
-            model.load_trainable_state_dict(sd)
-            rlog.log_text("Loaded trainable weights from %s", checkpoint)
-        else:
-            rlog.log_warning(
-                "No checkpoint provided; evaluating the *untrained* model "
-                "(baseline only)."
-            )
+        _load_checkpoint(model, checkpoint, rlog)
 
         test_path = Path(cfg["paths"]["processed_dir"]) / "test.jsonl"
         metrics = evaluate_split(
@@ -216,12 +273,7 @@ def run_evaluation(config_path: str, checkpoint: Optional[str] = None) -> Dict[s
             ks=cfg["eval"]["ks"],
             max_history_len=cfg["data"]["max_session_len"],
             seed=cfg["eval"]["negative_seed"],
-            micro_batch_size=int(
-                cfg["eval"].get(
-                    "micro_batch_size",
-                    cfg["train"]["micro_batch_size"],
-                )
-            ),
+            micro_batch_size=_eval_micro_batch_size(cfg),
             max_sessions=cfg["eval"].get("max_test_sessions"),
             desc="test",
             num_workers=int(cfg["eval"].get("num_workers", 0)),
@@ -232,8 +284,7 @@ def run_evaluation(config_path: str, checkpoint: Optional[str] = None) -> Dict[s
 
         results_path = Path(cfg["paths"]["results_path"])
         ensure_dir(results_path.parent)
-        import json
-        with open(results_path, "w") as f:
+        with open(results_path, "w", encoding="utf-8") as f:
             json.dump({"test": metrics}, f, indent=2)
         rlog.log_text("Test metrics: %s", metrics)
         rlog.log_text("Wrote metrics to %s", results_path)
@@ -242,5 +293,71 @@ def run_evaluation(config_path: str, checkpoint: Optional[str] = None) -> Dict[s
             **{f"test_{k}": v for k, v in metrics.items()},
         })
         return metrics
+    finally:
+        rlog.finish()
+
+
+def run_prompt_ablation(
+    config_path: str,
+    checkpoint: Optional[str] = None,
+    *,
+    modes: Optional[Sequence[str]] = None,
+    results_path: Optional[str] = None,
+) -> Dict[str, Dict[str, float]]:
+    cfg = load_config(config_path)
+    set_seed(cfg["seed"])
+    prompt_modes = _normalize_prompt_modes(modes)
+
+    rlog = RunLogger(cfg, run_kind="prompt_ablation")
+    try:
+        _apply_runtime_tweaks(cfg)
+
+        titles, _ = load_items_table(cfg["paths"]["processed_dir"])
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model = _build_eval_model(cfg, titles, device)
+
+        rlog.log_hardware({
+            "attn_implementation_used": getattr(model, "attn_impl_used", None),
+            "num_items": len(titles),
+            "checkpoint": checkpoint,
+            "prompt_modes": prompt_modes,
+        })
+        _load_checkpoint(model, checkpoint, rlog)
+
+        test_path = Path(cfg["paths"]["processed_dir"]) / "test.jsonl"
+        all_metrics: Dict[str, Dict[str, float]] = {}
+        for mode in prompt_modes:
+            model.set_prompt_mode(mode)
+            rlog.log_text("Running prompt ablation mode=%s", mode)
+            metrics = evaluate_split(
+                model,
+                test_path,
+                num_items=len(titles),
+                num_negatives=cfg["eval"]["num_negatives"],
+                ks=cfg["eval"]["ks"],
+                max_history_len=cfg["data"]["max_session_len"],
+                seed=cfg["eval"]["negative_seed"],
+                micro_batch_size=_eval_micro_batch_size(cfg),
+                max_sessions=cfg["eval"].get("max_test_sessions"),
+                desc=f"test/{mode}",
+                num_workers=int(cfg["eval"].get("num_workers", 0)),
+                cand_chunk_size=cfg["eval"].get("cand_chunk_size"),
+                rlog=rlog,
+                log_prefix=f"test/{mode}",
+            )
+            all_metrics[mode] = metrics
+
+        out_path = _prompt_ablation_results_path(cfg, results_path)
+        ensure_dir(out_path.parent)
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump({"test": all_metrics}, f, indent=2)
+
+        rlog.log_text("Prompt ablation metrics: %s", all_metrics)
+        rlog.log_text("Wrote prompt ablation metrics to %s", out_path)
+        summary = {"results_path": str(out_path)}
+        for mode, metrics in all_metrics.items():
+            summary.update({f"test_{mode}_{k}": v for k, v in metrics.items()})
+        rlog.log_summary(summary)
+        return all_metrics
     finally:
         rlog.finish()

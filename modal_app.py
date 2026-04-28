@@ -260,6 +260,12 @@ def _enter_workdir() -> None:
         sys.path.insert(0, "/root")
 
 
+def _parse_prompt_modes(modes: str | None) -> list[str] | None:
+    if modes is None or not modes.strip():
+        return None
+    return [mode for mode in modes.replace(",", " ").split() if mode]
+
+
 # --------------------------------------------------------------------------
 # Remote functions.
 # --------------------------------------------------------------------------
@@ -353,6 +359,31 @@ def evaluate_remote(
     return metrics
 
 
+@app.function(**_GPU_KWARGS)
+def prompt_ablation_remote(
+    config: str = DEFAULT_CONFIG,
+    checkpoint: str | None = DEFAULT_CHECKPOINT,
+    modes: str | None = None,
+    results_path: str | None = None,
+) -> dict:
+    """Run soft/hard prompt ablations for a trained checkpoint (H100)."""
+    _enter_workdir()
+
+    from src.evaluate import run_prompt_ablation
+
+    metrics = run_prompt_ablation(
+        config,
+        checkpoint,
+        modes=_parse_prompt_modes(modes),
+        results_path=results_path,
+    )
+
+    results_volume.commit()
+    logs_volume.commit()
+    hf_cache_volume.commit()
+    return metrics
+
+
 # --------------------------------------------------------------------------
 # Local entrypoints — invoked via `modal run modal_app.py::<name>`.
 # --------------------------------------------------------------------------
@@ -381,6 +412,27 @@ def evaluate(
     path *relative to /root* (i.e. inside the volumes)."""
     metrics = evaluate_remote.remote(config, checkpoint)
     print("[evaluate] ->", metrics)
+
+
+@app.local_entrypoint()
+def prompt_ablation(
+    config: str = DEFAULT_CONFIG,
+    checkpoint: str = DEFAULT_CHECKPOINT,
+    modes: str | None = None,
+    results_path: str | None = None,
+) -> None:
+    """Evaluate soft+hard, soft-only, and hard-only prompt modes on Modal.
+
+    ``modes`` can be a comma- or space-separated subset, e.g.
+    ``soft_hard,hard_only``.
+    """
+    metrics = prompt_ablation_remote.remote(
+        config,
+        checkpoint,
+        modes=modes,
+        results_path=results_path,
+    )
+    print("[prompt_ablation] ->", metrics)
 
 
 @app.local_entrypoint()

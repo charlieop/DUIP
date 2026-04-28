@@ -36,6 +36,7 @@ from .soft_prompt import SoftPromptProjector
 
 
 SOFT_PROMPT_MARKER = "<SOFT_PROMPT>"
+PROMPT_MODES = ("soft_hard", "soft_only", "hard_only")
 
 _logger = logging.getLogger(__name__)
 
@@ -187,6 +188,7 @@ class DUIPModel(nn.Module):
         gradient_checkpointing: bool = True,
         attn_implementation: Optional[str] = "flash_attention_2",
         cand_chunk_size: Optional[int] = None,
+        prompt_mode: str = "soft_hard",
         device: str | torch.device = "cuda",
     ) -> None:
         super().__init__()
@@ -203,6 +205,7 @@ class DUIPModel(nn.Module):
         self.hard_prompt_template = hard_prompt_template
         self.device_ = torch.device(device)
         self.cand_chunk_size = int(cand_chunk_size) if cand_chunk_size else None
+        self.prompt_mode = self._validate_prompt_mode(prompt_mode)
 
         if SOFT_PROMPT_MARKER not in hard_prompt_template:
             raise ValueError(
@@ -373,12 +376,24 @@ class DUIPModel(nn.Module):
             return "(no recent interactions)"
         return "; ".join(titles)
 
+    @staticmethod
+    def _validate_prompt_mode(prompt_mode: str) -> str:
+        if prompt_mode not in PROMPT_MODES:
+            valid = ", ".join(PROMPT_MODES)
+            raise ValueError(f"prompt_mode must be one of: {valid}")
+        return prompt_mode
+
+    def set_prompt_mode(self, prompt_mode: str) -> None:
+        """Select which prompt components are used by subsequent forwards."""
+        self.prompt_mode = self._validate_prompt_mode(prompt_mode)
+
     def _build_prompt_embeds(
         self,
         history_ids: torch.Tensor,
         history_mask: torch.Tensor,
-        soft_prompts: torch.Tensor,
+        soft_prompts: Optional[torch.Tensor],
         target_dtype: torch.dtype,
+        prompt_mode: str,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Construct per-example prompt embeddings in a *single* batched
         tokenizer + embedding-lookup call.
@@ -389,8 +404,18 @@ class DUIPModel(nn.Module):
         the soft + post sections – which are always present – align across
         the batch and the prompt always ends at column ``T_p - 1``.
         """
+        prompt_mode = self._validate_prompt_mode(prompt_mode)
         B = history_ids.shape[0]
         embed_layer = self.llm.get_input_embeddings()
+
+        if prompt_mode == "soft_only":
+            if soft_prompts is None:
+                raise ValueError("soft_only prompt mode requires soft prompts.")
+            prompt_emb = soft_prompts.to(target_dtype)
+            prompt_attn = torch.ones(
+                (B, prompt_emb.shape[1]), dtype=torch.long, device=self.device_,
+            )
+            return prompt_emb, prompt_attn
 
         # Build the per-example pre-text strings (cheap CPU work).
         pre_texts = [
@@ -421,6 +446,16 @@ class DUIPModel(nn.Module):
         post_emb = embed_layer(post_ids).to(target_dtype)          # [T_post, H]
         post_emb_b = post_emb.unsqueeze(0).expand(B, -1, -1)       # [B, T_post, H]
 
+        if prompt_mode == "hard_only":
+            prompt_emb = torch.cat([pre_emb, post_emb_b], dim=1)
+            post_attn_b = torch.ones(
+                (B, T_post), dtype=torch.long, device=self.device_,
+            )
+            prompt_attn = torch.cat([pre_attn, post_attn_b], dim=1)
+            return prompt_emb, prompt_attn
+
+        if soft_prompts is None:
+            raise ValueError("soft_hard prompt mode requires soft prompts.")
         soft_emb = soft_prompts.to(target_dtype)                   # [B, K, H]
         K = soft_emb.shape[1]
 
@@ -497,17 +532,18 @@ class DUIPModel(nn.Module):
 
         B, C = candidates.shape
 
-        # 1) LSTM hidden state h_t.
-        h_t = self.encoder(history_ids, history_mask)               # [B, H_lstm]
-        # 2) Soft prompt.
-        soft = self.projector(h_t)                                  # [B, K, H_llm]
-
         embed_layer = self.llm.get_input_embeddings()
         target_dtype = embed_layer.weight.dtype
 
+        # 1-2) Soft prompt path, skipped for hard-only ablations.
+        soft: Optional[torch.Tensor] = None
+        if self.prompt_mode != "hard_only":
+            h_t = self.encoder(history_ids, history_mask)            # [B, H_lstm]
+            soft = self.projector(h_t)                               # [B, K, H_llm]
+
         # 3) Prompt embeddings (single batched tokenizer call).
         prompt_emb, prompt_attn = self._build_prompt_embeds(
-            history_ids, history_mask, soft, target_dtype,
+            history_ids, history_mask, soft, target_dtype, self.prompt_mode,
         )                                                            # [B, T_p, H], [B, T_p]
         T_p = int(prompt_emb.shape[1])
         H = int(prompt_emb.shape[2])
