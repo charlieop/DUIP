@@ -22,9 +22,19 @@ model:
   llm_name: Qwen/Qwen3.5-0.8B
   llm_dtype: bfloat16
   item_embed_dim: 128
+  # Set to "transformer" to replace the LSTM with the Transformer encoder.
+  encoder_type: lstm
   lstm_hidden_dim: 256
   lstm_num_layers: 2
   lstm_dropout: 0.1
+  # Transformer encoder options. Hidden/layers/dropout default to the LSTM
+  # values when left null, so changing encoder_type is enough for a swap.
+  transformer_hidden_dim: null
+  transformer_num_layers: null
+  transformer_num_heads: 4
+  transformer_ff_dim: null
+  transformer_dropout: null
+  transformer_max_seq_len: 20
   num_soft_tokens: 8
   warm_start_item_embeddings: true
   freeze_llm: true

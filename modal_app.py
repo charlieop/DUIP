@@ -1,4 +1,4 @@
-"""Modal entrypoint for the DUIP pipeline (Qwen3.5-0.8B + LSTM, frozen LLM).
+"""Modal entrypoint for the DUIP pipeline (Qwen3.5-0.8B + encoder, frozen LLM).
 
 Runs the same `prepare_data`, `train`, and `eval` flows as the local
 scripts, but on Modal's managed **H100** GPUs with persistent volumes for

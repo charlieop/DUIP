@@ -1,7 +1,7 @@
 """DUIP training loop.
 
-The LLM is kept frozen; only the LSTM (with its item embedding table) and
-the soft-prompt projector are trained. Loss is InfoNCE / cross-entropy
+The LLM is kept frozen; only the session encoder (with its item embedding
+table) and the soft-prompt projector are trained. Loss is InfoNCE / cross-entropy
 over the (1 positive + N negative) candidate scores produced by
 ``DUIPModel``.
 
@@ -103,9 +103,18 @@ def run_training(config_path: str) -> Dict[str, float]:
         llm_name=cfg["model"]["llm_name"],
         llm_dtype=cfg["model"]["llm_dtype"],
         item_embed_dim=cfg["model"]["item_embed_dim"],
+        encoder_type=cfg["model"].get("encoder_type", "lstm"),
         lstm_hidden_dim=cfg["model"]["lstm_hidden_dim"],
         lstm_num_layers=cfg["model"]["lstm_num_layers"],
         lstm_dropout=cfg["model"]["lstm_dropout"],
+        transformer_hidden_dim=cfg["model"].get("transformer_hidden_dim"),
+        transformer_num_layers=cfg["model"].get("transformer_num_layers"),
+        transformer_num_heads=cfg["model"].get("transformer_num_heads", 4),
+        transformer_ff_dim=cfg["model"].get("transformer_ff_dim"),
+        transformer_dropout=cfg["model"].get("transformer_dropout"),
+        transformer_max_seq_len=cfg["model"].get(
+            "transformer_max_seq_len", cfg["data"]["max_session_len"]
+        ),
         num_soft_tokens=cfg["model"]["num_soft_tokens"],
         max_title_tokens=cfg["model"]["max_title_tokens"],
         hard_prompt_template=cfg["model"]["hard_prompt_template"],
@@ -118,7 +127,8 @@ def run_training(config_path: str) -> Dict[str, float]:
     )
     n_trainable = sum(p.numel() for p in model.trainable_parameters())
     n_frozen = sum(p.numel() for p in model.llm.parameters())
-    rlog.log_text("Trainable params (LSTM + projector + item-emb): %s",
+    rlog.log_text("Trainable params (%s encoder + projector + item-emb): %s",
+                  model.encoder_type,
                   f"{n_trainable:,}")
     rlog.log_text("Frozen LLM params: %s", f"{n_frozen:,}")
 
@@ -126,6 +136,7 @@ def run_training(config_path: str) -> Dict[str, float]:
     # implementation + parameter counts. Goes to console / JSONL / W&B.
     rlog.log_hardware({
         "attn_implementation_used": getattr(model, "attn_impl_used", None),
+        "encoder_type": getattr(model, "encoder_type", None),
         "trainable_params": n_trainable,
         "frozen_llm_params": n_frozen,
         "num_items": num_items,

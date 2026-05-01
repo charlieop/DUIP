@@ -64,9 +64,18 @@ def _build_eval_model(cfg: dict, titles: List[str], device: str) -> DUIPModel:
         llm_name=cfg["model"]["llm_name"],
         llm_dtype=cfg["model"]["llm_dtype"],
         item_embed_dim=cfg["model"]["item_embed_dim"],
+        encoder_type=cfg["model"].get("encoder_type", "lstm"),
         lstm_hidden_dim=cfg["model"]["lstm_hidden_dim"],
         lstm_num_layers=cfg["model"]["lstm_num_layers"],
         lstm_dropout=cfg["model"]["lstm_dropout"],
+        transformer_hidden_dim=cfg["model"].get("transformer_hidden_dim"),
+        transformer_num_layers=cfg["model"].get("transformer_num_layers"),
+        transformer_num_heads=cfg["model"].get("transformer_num_heads", 4),
+        transformer_ff_dim=cfg["model"].get("transformer_ff_dim"),
+        transformer_dropout=cfg["model"].get("transformer_dropout"),
+        transformer_max_seq_len=cfg["model"].get(
+            "transformer_max_seq_len", cfg["data"]["max_session_len"]
+        ),
         num_soft_tokens=cfg["model"]["num_soft_tokens"],
         max_title_tokens=cfg["model"]["max_title_tokens"],
         hard_prompt_template=cfg["model"]["hard_prompt_template"],

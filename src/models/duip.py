@@ -1,11 +1,11 @@
-"""DUIPModel — frozen Qwen3.5-2B + LSTM + soft-prompt projector.
+"""DUIPModel — frozen Qwen3.5-2B + session encoder + soft-prompt projector.
 
 Training-time forward
 ---------------------
 Given a session history and a set of candidate items (positive + negatives),
 the model produces a score per candidate via:
 
-1. ``LSTMEncoder``  -> dynamic-intent hidden state h_t              (Eq. 2)
+1. Session encoder -> dynamic-intent hidden state h_t                (Eq. 2)
 2. ``SoftPromptProjector`` -> K pseudo-token embeddings P_soft       (Eq. 3)
 3. Build the input-embedding stream:
    ``[pre_text_embeds]  ++  P_soft  ++  [post_text_embeds]``
@@ -33,10 +33,12 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .lstm_encoder import LSTMEncoder
 from .soft_prompt import SoftPromptProjector
+from .transformer_encoder import TransformerEncoder
 
 
 SOFT_PROMPT_MARKER = "<SOFT_PROMPT>"
 PROMPT_MODES = ("soft_hard", "soft_only", "hard_only")
+ENCODER_TYPES = ("lstm", "transformer")
 
 _logger = logging.getLogger(__name__)
 
@@ -172,9 +174,16 @@ class DUIPModel(nn.Module):
         llm_name: str = "Qwen/Qwen3.5-2B",
         llm_dtype: str = "bfloat16",
         item_embed_dim: int = 128,
+        encoder_type: str = "lstm",
         lstm_hidden_dim: int = 256,
         lstm_num_layers: int = 2,
         lstm_dropout: float = 0.1,
+        transformer_hidden_dim: Optional[int] = None,
+        transformer_num_layers: Optional[int] = None,
+        transformer_num_heads: int = 4,
+        transformer_ff_dim: Optional[int] = None,
+        transformer_dropout: Optional[float] = None,
+        transformer_max_seq_len: int = 512,
         num_soft_tokens: int = 8,
         max_title_tokens: int = 24,
         hard_prompt_template: str = (
@@ -206,6 +215,7 @@ class DUIPModel(nn.Module):
         self.device_ = torch.device(device)
         self.cand_chunk_size = int(cand_chunk_size) if cand_chunk_size else None
         self.prompt_mode = self._validate_prompt_mode(prompt_mode)
+        self.encoder_type = self._validate_encoder_type(encoder_type)
 
         if SOFT_PROMPT_MARKER not in hard_prompt_template:
             raise ValueError(
@@ -258,16 +268,23 @@ class DUIPModel(nn.Module):
 
         self.llm_hidden_dim = int(self.llm.get_input_embeddings().embedding_dim)
 
-        # ---- LSTM + soft-prompt projector --------------------------------
-        self.encoder = LSTMEncoder(
+        # ---- Session encoder + soft-prompt projector ---------------------
+        self.encoder, encoder_hidden_dim = self._build_encoder(
+            encoder_type=self.encoder_type,
             num_items=self.num_items,
             item_embed_dim=item_embed_dim,
-            hidden_dim=lstm_hidden_dim,
-            num_layers=lstm_num_layers,
-            dropout=lstm_dropout,
+            lstm_hidden_dim=lstm_hidden_dim,
+            lstm_num_layers=lstm_num_layers,
+            lstm_dropout=lstm_dropout,
+            transformer_hidden_dim=transformer_hidden_dim,
+            transformer_num_layers=transformer_num_layers,
+            transformer_num_heads=transformer_num_heads,
+            transformer_ff_dim=transformer_ff_dim,
+            transformer_dropout=transformer_dropout,
+            transformer_max_seq_len=transformer_max_seq_len,
         )
         self.projector = SoftPromptProjector(
-            in_dim=lstm_hidden_dim,
+            in_dim=encoder_hidden_dim,
             llm_hidden_dim=self.llm_hidden_dim,
             num_soft_tokens=num_soft_tokens,
         )
@@ -382,6 +399,67 @@ class DUIPModel(nn.Module):
             valid = ", ".join(PROMPT_MODES)
             raise ValueError(f"prompt_mode must be one of: {valid}")
         return prompt_mode
+
+    @staticmethod
+    def _validate_encoder_type(encoder_type: str) -> str:
+        encoder_type = encoder_type.lower()
+        if encoder_type not in ENCODER_TYPES:
+            valid = ", ".join(ENCODER_TYPES)
+            raise ValueError(f"encoder_type must be one of: {valid}")
+        return encoder_type
+
+    @staticmethod
+    def _build_encoder(
+        *,
+        encoder_type: str,
+        num_items: int,
+        item_embed_dim: int,
+        lstm_hidden_dim: int,
+        lstm_num_layers: int,
+        lstm_dropout: float,
+        transformer_hidden_dim: Optional[int],
+        transformer_num_layers: Optional[int],
+        transformer_num_heads: int,
+        transformer_ff_dim: Optional[int],
+        transformer_dropout: Optional[float],
+        transformer_max_seq_len: int,
+    ) -> Tuple[nn.Module, int]:
+        if encoder_type == "lstm":
+            encoder = LSTMEncoder(
+                num_items=num_items,
+                item_embed_dim=item_embed_dim,
+                hidden_dim=lstm_hidden_dim,
+                num_layers=lstm_num_layers,
+                dropout=lstm_dropout,
+            )
+            return encoder, int(lstm_hidden_dim)
+
+        hidden_dim = int(
+            transformer_hidden_dim
+            if transformer_hidden_dim is not None
+            else lstm_hidden_dim
+        )
+        num_layers = int(
+            transformer_num_layers
+            if transformer_num_layers is not None
+            else lstm_num_layers
+        )
+        dropout = float(
+            transformer_dropout
+            if transformer_dropout is not None
+            else lstm_dropout
+        )
+        encoder = TransformerEncoder(
+            num_items=num_items,
+            item_embed_dim=item_embed_dim,
+            hidden_dim=hidden_dim,
+            num_layers=num_layers,
+            num_heads=transformer_num_heads,
+            ff_dim=transformer_ff_dim,
+            dropout=dropout,
+            max_seq_len=transformer_max_seq_len,
+        )
+        return encoder, hidden_dim
 
     def set_prompt_mode(self, prompt_mode: str) -> None:
         """Select which prompt components are used by subsequent forwards."""
@@ -538,7 +616,7 @@ class DUIPModel(nn.Module):
         # 1-2) Soft prompt path, skipped for hard-only ablations.
         soft: Optional[torch.Tensor] = None
         if self.prompt_mode != "hard_only":
-            h_t = self.encoder(history_ids, history_mask)            # [B, H_lstm]
+            h_t = self.encoder(history_ids, history_mask)            # [B, H_enc]
             soft = self.projector(h_t)                               # [B, K, H_llm]
 
         # 3) Prompt embeddings (single batched tokenizer call).
