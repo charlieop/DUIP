@@ -1,10 +1,10 @@
-"""Soft-prompt projector f(h_t) -> K x d_llm pseudo-token embeddings.
 
-Implements Eq. 3 of the paper. We use a small two-layer MLP and a
-LayerNorm at the end so the pseudo-tokens have a similar scale to the
-frozen Qwen input-embedding distribution (this matters because we splice
-them directly into Qwen's embedding stream).
-"""
+
+
+
+
+
+
 
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ class SoftPromptProjector(nn.Module):
         self.layer_norm = nn.LayerNorm(self.llm_hidden_dim)
 
     def forward(self, h: torch.Tensor) -> torch.Tensor:
-        """h: [B, in_dim] -> soft prompts [B, K, llm_hidden_dim]."""
+
         B = h.shape[0]
         out = self.net(h)
         out = out.view(B, self.num_soft_tokens, self.llm_hidden_dim)

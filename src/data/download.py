@@ -1,17 +1,3 @@
-"""Download the Amazon Reviews 2023 (Video Games) raw review + meta splits.
-
-We rely on the official Hugging Face mirror
-``McAuley-Lab/Amazon-Reviews-2023`` published with the paper
-"Bridging Language and Items for Retrieval and Recommendation" (McAuley et al.,
-2024).
-
-Note: the dataset on the HF Hub used to ship a custom ``Amazon-Reviews-2023.py``
-loading script. ``datasets>=4.0`` no longer supports loading scripts, so we
-instead pull the per-category JSONL files directly via ``hf_hub_download``
-and stream-convert them into slim Parquet files (only the columns the rest
-of the pipeline actually needs) under ``raw_dir``.
-"""
-
 from __future__ import annotations
 
 import json
@@ -25,35 +11,33 @@ from huggingface_hub import hf_hub_download
 from ..utils import ensure_dir, get_logger
 
 
-# --- column schemas we keep in the slim parquet files ----------------------
-
 REVIEW_COLS = ("user_id", "parent_asin", "asin", "timestamp", "rating")
 META_COLS = ("parent_asin", "title", "main_category", "categories")
 
-REVIEW_SCHEMA = pa.schema([
-    ("user_id", pa.string()),
-    ("parent_asin", pa.string()),
-    ("asin", pa.string()),
-    ("timestamp", pa.int64()),
-    ("rating", pa.float32()),
-])
-META_SCHEMA = pa.schema([
-    ("parent_asin", pa.string()),
-    ("title", pa.string()),
-    ("main_category", pa.string()),
-    ("categories", pa.list_(pa.string())),
-])
+REVIEW_SCHEMA = pa.schema(
+    [
+        ("user_id", pa.string()),
+        ("parent_asin", pa.string()),
+        ("asin", pa.string()),
+        ("timestamp", pa.int64()),
+        ("rating", pa.float32()),
+    ]
+)
+META_SCHEMA = pa.schema(
+    [
+        ("parent_asin", pa.string()),
+        ("title", pa.string()),
+        ("main_category", pa.string()),
+        ("categories", pa.list_(pa.string())),
+    ]
+)
 
 
 def _category_from_config(config_name: str) -> str:
-    """Extract the category suffix from a HF-style config name.
 
-    e.g. ``raw_review_Video_Games`` -> ``Video_Games``,
-         ``raw_meta_Video_Games``   -> ``Video_Games``.
-    """
     for prefix in ("raw_review_", "raw_meta_"):
         if config_name.startswith(prefix):
-            return config_name[len(prefix):]
+            return config_name[len(prefix) :]
     return config_name
 
 
@@ -66,12 +50,7 @@ def _stream_jsonl_to_parquet(
     batch_size: int = 100_000,
     logger=None,
 ) -> int:
-    """Read ``src_path`` line-by-line and write ``dst_path`` as Parquet.
 
-    Only keeps the columns listed in ``keep_cols`` (other fields are dropped
-    so we don't blow up RAM / disk on the full review payload). Returns the
-    number of rows written.
-    """
     rows_written = 0
     buffer: Dict[str, list] = {c: [] for c in keep_cols}
 
@@ -112,12 +91,7 @@ def download_games(
     review_config: str = "raw_review_Video_Games",
     meta_config: str = "raw_meta_Video_Games",
 ) -> Tuple[Path, Path]:
-    """Download (or load from cache) the review and metadata files.
 
-    Streams the per-category JSONL files from ``hf_dataset`` into slim
-    Parquet files (only the fields the preprocess step actually needs)
-    under ``raw_dir``. Returns the (review_parquet, meta_parquet) paths.
-    """
     logger = get_logger("data.download")
     ensure_dir(raw_dir)
 
@@ -141,7 +115,10 @@ def download_games(
         )
         logger.info("Streaming -> %s ...", review_path)
         n = _stream_jsonl_to_parquet(
-            Path(review_jsonl), review_path, REVIEW_COLS, REVIEW_SCHEMA,
+            Path(review_jsonl),
+            review_path,
+            REVIEW_COLS,
+            REVIEW_SCHEMA,
             logger=logger,
         )
         logger.info("Wrote %d review rows to %s.", n, review_path)
@@ -158,7 +135,10 @@ def download_games(
         )
         logger.info("Streaming -> %s ...", meta_path)
         n = _stream_jsonl_to_parquet(
-            Path(meta_jsonl), meta_path, META_COLS, META_SCHEMA,
+            Path(meta_jsonl),
+            meta_path,
+            META_COLS,
+            META_SCHEMA,
             logger=logger,
         )
         logger.info("Wrote %d meta rows to %s.", n, meta_path)
@@ -169,7 +149,7 @@ def download_games(
 
 
 def field_summary(raw_dir: str) -> Dict[str, list]:
-    """Convenience: list columns of the cached parquet files."""
+
     import pandas as pd
 
     rev = pd.read_parquet(Path(raw_dir) / "reviews.parquet")

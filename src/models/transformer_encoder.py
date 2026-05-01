@@ -1,10 +1,10 @@
-"""Transformer encoder over a session of item ids -> dynamic-intent state.
 
-This module intentionally mirrors ``LSTMEncoder``'s public API so DUIP can
-switch encoders with a config-only change. It owns the item embedding table,
-supports the same warm-start tensor, and returns a single ``[B, hidden_dim]``
-state for the soft-prompt projector.
-"""
+
+
+
+
+
+
 
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ class TransformerEncoder(nn.Module):
         if self.max_seq_len <= 0:
             raise ValueError("max_seq_len must be positive")
 
-        # Match LSTMEncoder: reserve an optional extra row for padding.
+        
         self.pad_idx = self.num_items if padding_idx is None else padding_idx
         vocab = self.num_items + (0 if padding_idx is not None else 1)
 
@@ -79,7 +79,7 @@ class TransformerEncoder(nn.Module):
 
     @torch.no_grad()
     def warm_start_from(self, embeddings: torch.Tensor) -> None:
-        """Initialize the item table from a [num_items, item_embed_dim] tensor."""
+
         if embeddings.shape != (self.num_items, self.item_embed_dim):
             raise ValueError(
                 f"warm-start tensor must have shape "
@@ -94,11 +94,11 @@ class TransformerEncoder(nn.Module):
     def forward(
         self, history_ids: torch.Tensor, history_mask: torch.Tensor
     ) -> torch.Tensor:
-        """Return a dynamic-intent state of shape [B, hidden_dim].
 
-        ``history_ids``: [B, L] long, padded with ``pad_idx``.
-        ``history_mask``: [B, L] bool, True where the position is a real item.
-        """
+
+
+
+
         B, L = history_ids.shape
         if L > self.max_seq_len:
             raise ValueError(
@@ -117,7 +117,7 @@ class TransformerEncoder(nn.Module):
         key_padding_mask = ~history_mask
         empty_rows = key_padding_mask.all(dim=1)
         if empty_rows.any():
-            # PyTorch attention cannot receive rows where every key is masked.
+            
             key_padding_mask = key_padding_mask.clone()
             key_padding_mask[empty_rows, 0] = False
 

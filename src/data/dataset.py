@@ -1,10 +1,3 @@
-"""SessionDataset: yields (history, target, candidate) triples for DUIP.
-
-The candidate list always has the *positive* item at index 0, followed by
-``num_negatives`` randomly sampled negatives. This ordering is exploited
-by ``src.utils.{hit_at_k, ndcg_at_k}``.
-"""
-
 from __future__ import annotations
 
 import random
@@ -26,15 +19,6 @@ class SessionExample:
 
 
 class SessionDataset(Dataset):
-    """Sessions -> (history, target, candidates) examples.
-
-    ``mode='train'``: pick a *random* split point inside each session each
-        epoch and resample fresh negatives. Set ``epoch`` via ``set_epoch``
-        to vary the RNG without resetting the loader.
-    ``mode='eval'``: target is always the *last* item of the session;
-        history is the prefix; negatives are sampled deterministically
-        with a fixed seed so the metric is reproducible.
-    """
 
     def __init__(
         self,
@@ -66,12 +50,12 @@ class SessionDataset(Dataset):
         items: List[int] = list(sess["items"])
         n = len(items)
         if n < 2:
-            # Should not happen because preprocess filters this, but be safe.
+
             raise IndexError("Session too short")
 
         if self.mode == "train":
             rng = random.Random((self.seed * 1_000_003 + self._epoch) * 97 + idx)
-            # split point t in [1, n-1] -> history = items[:t], target = items[t]
+
             t = rng.randint(1, n - 1)
             history = items[:t][-self.max_history_len :]
             target = items[t]
@@ -94,7 +78,7 @@ class SessionDataset(Dataset):
 
 
 def collate(batch: List[SessionExample]) -> Dict[str, torch.Tensor]:
-    """Right-pad histories; stack candidates."""
+
     max_len = max(len(ex.history) for ex in batch)
     B = len(batch)
     history_ids = torch.zeros((B, max_len), dtype=torch.long)
@@ -104,9 +88,7 @@ def collate(batch: List[SessionExample]) -> Dict[str, torch.Tensor]:
         history_ids[i, :L] = torch.tensor(ex.history, dtype=torch.long)
         history_mask[i, :L] = True
 
-    candidates = torch.tensor(
-        [ex.candidates for ex in batch], dtype=torch.long
-    )  # [B, 1+N]
+    candidates = torch.tensor([ex.candidates for ex in batch], dtype=torch.long)
     targets = torch.tensor([ex.target for ex in batch], dtype=torch.long)
     return {
         "history_ids": history_ids,

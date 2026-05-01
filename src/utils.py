@@ -1,5 +1,3 @@
-"""Shared utilities: config loading, seeding, logging, ranking metrics."""
-
 from __future__ import annotations
 
 import json
@@ -74,21 +72,14 @@ def read_jsonl(path: str | os.PathLike) -> List[Dict[str, Any]]:
     return out
 
 
-# ----------------------------------------------------------------------------
-# Ranking metrics
-#
-# `scores` has shape [B, C] where index 0 of the candidate dimension is the
-# positive item (this is the convention used throughout this codebase).
-# ----------------------------------------------------------------------------
-
 def hit_at_k(scores: torch.Tensor, k: int) -> float:
-    """Hit Rate @ K. Positive is at index 0 along the last dim."""
+
     ranks = _ranks_of_positive(scores)
     return float((ranks < k).float().mean().item())
 
 
 def ndcg_at_k(scores: torch.Tensor, k: int) -> float:
-    """NDCG @ K with a single relevant item at index 0."""
+
     ranks = _ranks_of_positive(scores)
     in_top = ranks < k
     gains = torch.zeros_like(ranks, dtype=torch.float32)
@@ -100,12 +91,7 @@ def ndcg_at_k(scores: torch.Tensor, k: int) -> float:
 def hr_ndcg_from_scores(
     scores: torch.Tensor, ks: Iterable[int] = (1, 5)
 ) -> Dict[str, float]:
-    """Vectorized HR@K + NDCG@K for all ``k`` in ``ks`` from a [B, C] tensor.
 
-    Cheaper than calling :func:`hit_at_k` / :func:`ndcg_at_k` once per K
-    because it computes the rank-of-positive only once. Used during
-    training to log in-batch ranking quality every step.
-    """
     ranks = _ranks_of_positive(scores)
     out: Dict[str, float] = {}
     for k in ks:
@@ -118,12 +104,7 @@ def hr_ndcg_from_scores(
 
 
 def _ranks_of_positive(scores: torch.Tensor) -> torch.Tensor:
-    """Return the 0-based rank of the candidate at index 0 of each row.
 
-    A rank of 0 means the positive item has the *highest* score (best).
-    Ties are broken pessimistically (counted as worse), to avoid spurious
-    metric inflation.
-    """
     pos_scores = scores[:, 0:1]
     higher = (scores > pos_scores).sum(dim=1)
     return higher

@@ -1,5 +1,3 @@
-"""Evaluation: HR@K and NDCG@K with the 1-positive + N-negative protocol."""
-
 from __future__ import annotations
 
 import json
@@ -47,8 +45,7 @@ def _build_eval_loader(
 
 
 def _apply_runtime_tweaks(cfg: dict) -> None:
-    # Honour the same runtime tweaks here so eval-only invocations also
-    # benefit from TF32 / cudnn.benchmark when available.
+
     rt = cfg.get("runtime", {}) or {}
     if rt.get("tf32", True) and torch.cuda.is_available():
         torch.backends.cuda.matmul.allow_tf32 = True
@@ -81,7 +78,7 @@ def _build_eval_model(cfg: dict, titles: List[str], device: str) -> DUIPModel:
         hard_prompt_template=cfg["model"]["hard_prompt_template"],
         warm_start_item_embeddings=cfg["model"]["warm_start_item_embeddings"],
         freeze_llm=cfg["model"]["freeze_llm"],
-        gradient_checkpointing=False,  # not needed at eval
+        gradient_checkpointing=False,
         attn_implementation=cfg["model"].get(
             "attn_implementation", "flash_attention_2"
         ),
@@ -117,7 +114,9 @@ def _eval_micro_batch_size(cfg: dict) -> int:
 
 
 def _normalize_prompt_modes(modes: Optional[Sequence[str]]) -> List[str]:
-    requested = list(modes) if modes is not None else list(DEFAULT_PROMPT_ABLATION_MODES)
+    requested = (
+        list(modes) if modes is not None else list(DEFAULT_PROMPT_ABLATION_MODES)
+    )
     if not requested:
         raise ValueError("At least one prompt mode is required.")
 
@@ -162,17 +161,7 @@ def evaluate_split(
     log_prefix: str = "eval",
     log_step: Optional[int] = None,
 ) -> Dict[str, float]:
-    """Score all sessions in ``jsonl_path`` and return HR/NDCG metrics.
 
-    ``cand_chunk_size`` (when provided) temporarily overrides
-    ``model.cand_chunk_size`` for the duration of the call. Because eval
-    is forward-only and skips activation storage, it usually tolerates a
-    much larger chunk than training.
-
-    If ``rlog`` is provided, per-batch progress (sessions/sec, running
-    HR@1, GPU memory) is also forwarded to the structured logger / W&B
-    run.
-    """
     ds = SessionDataset(
         jsonl_path,
         num_items=num_items,
@@ -185,16 +174,15 @@ def evaluate_split(
         ds.sessions = ds.sessions[:max_sessions]
 
     loader = _build_eval_loader(
-        ds, batch_size=micro_batch_size, num_workers=num_workers,
+        ds,
+        batch_size=micro_batch_size,
+        num_workers=num_workers,
     )
 
-    # Eval-time chunk override (restored in `finally`).
     prev_chunk = getattr(model, "cand_chunk_size", None)
     if cand_chunk_size is not None:
         model.cand_chunk_size = int(cand_chunk_size)
 
-    # Free any cached blocks left over from the training step before we
-    # start a long forward-only loop. Helps after a backward-OOM retry too.
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
@@ -216,7 +204,6 @@ def evaluate_split(
             elapsed = max(time.time() - t_start, 1e-9)
             sps = n_seen / elapsed
 
-            # Running HR@1 over what we've seen (cheap; reuses tensors).
             running = torch.cat(all_scores, dim=0)
             running_hr1 = hit_at_k(running, 1)
 
@@ -247,12 +234,14 @@ def evaluate_split(
 
         return metrics
     finally:
-        # Restore the model's chunk size for any subsequent training step.
+
         if cand_chunk_size is not None:
             model.cand_chunk_size = prev_chunk
 
 
-def run_evaluation(config_path: str, checkpoint: Optional[str] = None) -> Dict[str, float]:
+def run_evaluation(
+    config_path: str, checkpoint: Optional[str] = None
+) -> Dict[str, float]:
     cfg = load_config(config_path)
     set_seed(cfg["seed"])
 
@@ -265,11 +254,13 @@ def run_evaluation(config_path: str, checkpoint: Optional[str] = None) -> Dict[s
         device = "cuda" if torch.cuda.is_available() else "cpu"
         model = _build_eval_model(cfg, titles, device)
 
-        rlog.log_hardware({
-            "attn_implementation_used": getattr(model, "attn_impl_used", None),
-            "num_items": len(titles),
-            "checkpoint": checkpoint,
-        })
+        rlog.log_hardware(
+            {
+                "attn_implementation_used": getattr(model, "attn_impl_used", None),
+                "num_items": len(titles),
+                "checkpoint": checkpoint,
+            }
+        )
 
         _load_checkpoint(model, checkpoint, rlog)
 
@@ -297,10 +288,12 @@ def run_evaluation(config_path: str, checkpoint: Optional[str] = None) -> Dict[s
             json.dump({"test": metrics}, f, indent=2)
         rlog.log_text("Test metrics: %s", metrics)
         rlog.log_text("Wrote metrics to %s", results_path)
-        rlog.log_summary({
-            "results_path": str(results_path),
-            **{f"test_{k}": v for k, v in metrics.items()},
-        })
+        rlog.log_summary(
+            {
+                "results_path": str(results_path),
+                **{f"test_{k}": v for k, v in metrics.items()},
+            }
+        )
         return metrics
     finally:
         rlog.finish()
@@ -325,12 +318,14 @@ def run_prompt_ablation(
         device = "cuda" if torch.cuda.is_available() else "cpu"
         model = _build_eval_model(cfg, titles, device)
 
-        rlog.log_hardware({
-            "attn_implementation_used": getattr(model, "attn_impl_used", None),
-            "num_items": len(titles),
-            "checkpoint": checkpoint,
-            "prompt_modes": prompt_modes,
-        })
+        rlog.log_hardware(
+            {
+                "attn_implementation_used": getattr(model, "attn_impl_used", None),
+                "num_items": len(titles),
+                "checkpoint": checkpoint,
+                "prompt_modes": prompt_modes,
+            }
+        )
         _load_checkpoint(model, checkpoint, rlog)
 
         test_path = Path(cfg["paths"]["processed_dir"]) / "test.jsonl"

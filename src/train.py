@@ -1,18 +1,3 @@
-"""DUIP training loop.
-
-The LLM is kept frozen; only the session encoder (with its item embedding
-table) and the soft-prompt projector are trained. Loss is InfoNCE / cross-entropy
-over the (1 positive + N negative) candidate scores produced by
-``DUIPModel``.
-
-This module also drives the *detailed* logging stack: every optimizer
-step we record loss / EMA / LR / grad-norm / throughput (samples & tokens
-per second) / GPU memory / in-batch HR@K + NDCG@K. The metrics are
-streamed to the console, a per-run JSONL file under
-``cfg.paths.log_dir/<run_name>/``, and to Weights & Biases (when
-configured / installed).
-"""
-
 from __future__ import annotations
 
 import math
@@ -46,7 +31,7 @@ def _cosine_schedule(optimizer, num_warmup: int, num_training_steps: int) -> Lam
 
 
 def _apply_runtime_flags(cfg: Dict, logger) -> None:
-    """Best-effort matmul / cudnn tweaks. All driven by cfg['runtime']."""
+
     rt = cfg.get("runtime", {}) or {}
     if rt.get("tf32", True) and torch.cuda.is_available():
         torch.backends.cuda.matmul.allow_tf32 = True
@@ -57,7 +42,7 @@ def _apply_runtime_flags(cfg: Dict, logger) -> None:
     if prec:
         try:
             torch.set_float32_matmul_precision(prec)
-        except Exception as e:  # pragma: no cover
+        except Exception as e:
             logger.log_warning("set_float32_matmul_precision(%r) failed: %s", prec, e)
 
 
@@ -81,8 +66,6 @@ def run_training(config_path: str) -> Dict[str, float]:
     cfg = load_config(config_path)
     set_seed(cfg["seed"])
 
-    # Init the structured run logger first so everything downstream can
-    # use it (console + per-run JSONL + W&B).
     rlog = RunLogger(cfg, run_kind="train")
     _apply_runtime_flags(cfg, rlog)
 
@@ -93,9 +76,6 @@ def run_training(config_path: str) -> Dict[str, float]:
     if device == "cpu":
         rlog.log_warning("CUDA not available; this will be very slow.")
 
-    # ------------------------------------------------------------------
-    # Model
-    # ------------------------------------------------------------------
     rlog.log_text("Initializing DUIP model with LLM=%s ...", cfg["model"]["llm_name"])
     model = DUIPModel(
         num_items=num_items,
@@ -121,30 +101,31 @@ def run_training(config_path: str) -> Dict[str, float]:
         warm_start_item_embeddings=cfg["model"]["warm_start_item_embeddings"],
         freeze_llm=cfg["model"]["freeze_llm"],
         gradient_checkpointing=cfg["model"]["gradient_checkpointing"],
-        attn_implementation=cfg["model"].get("attn_implementation", "flash_attention_2"),
+        attn_implementation=cfg["model"].get(
+            "attn_implementation", "flash_attention_2"
+        ),
         cand_chunk_size=cfg["model"].get("cand_chunk_size"),
         device=device,
     )
     n_trainable = sum(p.numel() for p in model.trainable_parameters())
     n_frozen = sum(p.numel() for p in model.llm.parameters())
-    rlog.log_text("Trainable params (%s encoder + projector + item-emb): %s",
-                  model.encoder_type,
-                  f"{n_trainable:,}")
+    rlog.log_text(
+        "Trainable params (%s encoder + projector + item-emb): %s",
+        model.encoder_type,
+        f"{n_trainable:,}",
+    )
     rlog.log_text("Frozen LLM params: %s", f"{n_frozen:,}")
 
-    # Now that the model is built, log hardware + the actually-used attn
-    # implementation + parameter counts. Goes to console / JSONL / W&B.
-    rlog.log_hardware({
-        "attn_implementation_used": getattr(model, "attn_impl_used", None),
-        "encoder_type": getattr(model, "encoder_type", None),
-        "trainable_params": n_trainable,
-        "frozen_llm_params": n_frozen,
-        "num_items": num_items,
-    })
+    rlog.log_hardware(
+        {
+            "attn_implementation_used": getattr(model, "attn_impl_used", None),
+            "encoder_type": getattr(model, "encoder_type", None),
+            "trainable_params": n_trainable,
+            "frozen_llm_params": n_frozen,
+            "num_items": num_items,
+        }
+    )
 
-    # ------------------------------------------------------------------
-    # Data
-    # ------------------------------------------------------------------
     train_ds = SessionDataset(
         Path(cfg["paths"]["processed_dir"]) / "train.jsonl",
         num_items=num_items,
@@ -156,21 +137,21 @@ def run_training(config_path: str) -> Dict[str, float]:
     max_train_sessions = cfg["train"].get("max_train_sessions")
     if max_train_sessions is not None:
         train_ds.sessions = train_ds.sessions[: int(max_train_sessions)]
-        rlog.log_text("Capped train set to %d sessions for smoke test.",
-                      len(train_ds.sessions))
+        rlog.log_text(
+            "Capped train set to %d sessions for smoke test.", len(train_ds.sessions)
+        )
 
     val_ds_path = Path(cfg["paths"]["processed_dir"]) / "val.jsonl"
     max_val_sessions = cfg["eval"].get("max_val_sessions")
 
     train_loader = _build_train_loader(cfg, train_ds)
-    rlog.log_text("DataLoader: batch=%d workers=%d pin_memory=%s",
-                  cfg["train"]["micro_batch_size"],
-                  int(cfg["train"].get("num_workers", 0)),
-                  torch.cuda.is_available())
+    rlog.log_text(
+        "DataLoader: batch=%d workers=%d pin_memory=%s",
+        cfg["train"]["micro_batch_size"],
+        int(cfg["train"].get("num_workers", 0)),
+        torch.cuda.is_available(),
+    )
 
-    # ------------------------------------------------------------------
-    # Optimizer / scheduler
-    # ------------------------------------------------------------------
     optim = AdamW(
         model.trainable_parameters(),
         lr=cfg["train"]["lr"],
@@ -181,9 +162,6 @@ def run_training(config_path: str) -> Dict[str, float]:
     total_steps = steps_per_epoch * cfg["train"]["num_epochs"]
     scheduler = _cosine_schedule(optim, cfg["train"]["warmup_steps"], total_steps)
 
-    # ------------------------------------------------------------------
-    # Loop
-    # ------------------------------------------------------------------
     ckpt_dir = ensure_dir(cfg["paths"]["checkpoint_dir"])
     best_path = ckpt_dir / "best.pt"
     best_metric = -float("inf")
@@ -204,7 +182,7 @@ def run_training(config_path: str) -> Dict[str, float]:
             train_ds.set_epoch(epoch)
             model.train()
             if cfg["model"]["freeze_llm"]:
-                model.llm.eval()  # keep dropout off in the frozen LLM
+                model.llm.eval()
 
             running = 0.0
             n_loss = 0
@@ -231,12 +209,10 @@ def run_training(config_path: str) -> Dict[str, float]:
                 running += float(loss.item())
                 n_loss += 1
 
-                # Cheap in-batch ranking metrics for logging only.
                 with torch.no_grad():
                     in_batch = hr_ndcg_from_scores(out.scores.detach(), ks=log_ks)
                 loss_ema = rlog.update_loss_ema(float(loss.item()))
 
-                # ---- optimizer step -----------------------------------
                 if (step + 1) % grad_accum == 0:
                     grad_norm_t = torch.nn.utils.clip_grad_norm_(
                         model.trainable_parameters(),
@@ -248,17 +224,17 @@ def run_training(config_path: str) -> Dict[str, float]:
                     optim.zero_grad(set_to_none=True)
                     global_step += 1
 
-                # ---- per-step logging ---------------------------------
                 now = time.time()
                 step_dt = now - last_step_t
                 last_step_t = now
-                # token count for throughput (rough but informative).
-                approx_tokens = B_step * C_step * (
-                    int(batch["history_ids"].shape[1]) + int(model.max_title_tokens)
+
+                approx_tokens = (
+                    B_step
+                    * C_step
+                    * (int(batch["history_ids"].shape[1]) + int(model.max_title_tokens))
                 )
                 tput = rlog.update_throughput(B_step, approx_tokens, step_dt)
 
-                # tqdm postfix: short and useful at every iteration.
                 postfix = {
                     "loss": f"{loss.item():.4f}",
                     "ema": f"{loss_ema:.4f}",
@@ -269,7 +245,6 @@ def run_training(config_path: str) -> Dict[str, float]:
                     postfix["mem"] = f"{torch.cuda.memory_allocated() / 1024 ** 3:.1f}G"
                 pbar.set_postfix(postfix)
 
-                # Detailed log every cfg.logging.log_every_steps optimizer steps.
                 if (step + 1) % grad_accum == 0 and rlog.should_log(global_step):
                     mem = gpu_mem_stats(reset_peak=True)
                     metrics = {
@@ -296,7 +271,6 @@ def run_training(config_path: str) -> Dict[str, float]:
                 prefix="train",
             )
 
-            # ---- validation ------------------------------------------
             if (epoch + 1) % cfg["train"]["eval_every_epochs"] == 0:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
@@ -330,34 +304,39 @@ def run_training(config_path: str) -> Dict[str, float]:
                     torch.save(model.trainable_state_dict(), best_path)
                     rlog.log_text(
                         "New best %s=%.4f, saved %s",
-                        primary_metric, cur, best_path,
+                        primary_metric,
+                        cur,
+                        best_path,
                     )
                     bad_epochs = 0
                 else:
                     bad_epochs += 1
                     if bad_epochs >= cfg["train"]["early_stop_patience"]:
                         rlog.log_text(
-                            "Early stop: %d epochs without improvement.", bad_epochs,
+                            "Early stop: %d epochs without improvement.",
+                            bad_epochs,
                         )
                         break
 
-        # ------------------------------------------------------------------
-        # Persist training history alongside results.
-        # ------------------------------------------------------------------
         import json
+
         out_dir = ensure_dir(Path(cfg["paths"]["results_path"]).parent)
         with open(out_dir / "training_history.json", "w") as f:
             json.dump(
                 {"best_val_" + primary_metric: best_metric, "history": history},
-                f, indent=2,
+                f,
+                indent=2,
             )
-        rlog.log_summary({
-            "best_val_" + primary_metric: best_metric,
-            "global_steps": global_step,
-            "checkpoint": str(best_path),
-        })
-        rlog.log_text("Training complete. Best val %s = %.4f",
-                      primary_metric, best_metric)
+        rlog.log_summary(
+            {
+                "best_val_" + primary_metric: best_metric,
+                "global_steps": global_step,
+                "checkpoint": str(best_path),
+            }
+        )
+        rlog.log_text(
+            "Training complete. Best val %s = %.4f", primary_metric, best_metric
+        )
         return {"best_val_" + primary_metric: best_metric}
     finally:
         rlog.finish()
